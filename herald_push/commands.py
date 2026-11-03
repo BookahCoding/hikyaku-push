@@ -11,7 +11,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from . import cron, push
 from .phone import TOOLS, Phones
@@ -46,17 +46,25 @@ def trusted_surface() -> bool:
         return False
 
 
+def op_and_json(raw: str, reply: Callable[..., str]) -> Tuple[str, object, Optional[str]]:
+    """Splits ``<op> <json>`` and parses the JSON. Returns (op, data, None), or (op, None, an error answer) when the
+    argument isn't JSON. ``data`` may be any JSON value, so callers still check its shape."""
+    op, _, rest = raw.partition(" ")
+    try:
+        return op, json.loads(rest.strip()), None
+    except ValueError:
+        return op, None, reply(ok=False, error="not JSON")
+
+
 def phone_command(phones: Phones, raw: str, reply: Callable[..., str]) -> str:
     """``phone tools <json>``: what this phone has switched on. ``phone pending <json>``: the tool calls
     waiting for it. ``phone answer <json>``: the result of one. ``phone here <json>``: this phone sends messages
     on chat connection ``sid``, so calls from those turns come to it. ``phone list <json>``: every phone, in the
     order calls no phone started (cron jobs) try them. ``phone order <json>``: that order, as ``ids``. ``phone
     remove <json>``: forgets another phone, ``id``. Each carries the phone's ``device_id`` and secret ``key``."""
-    op, _, rest = raw.partition(" ")
-    try:
-        data = json.loads(rest.strip())
-    except ValueError:
-        return reply(ok=False, error="not JSON")
+    op, data, bad = op_and_json(raw, reply)
+    if bad is not None:
+        return bad
     if not isinstance(data, dict):
         return reply(ok=False, error="not an object")
     device_id, key = data.get("device_id"), data.get("key")
@@ -111,11 +119,9 @@ def cron_command(store: Store, raw: str, reply: Callable[..., str], root: Option
     runs it follows, newest first (``limit``, ``before``). ``cron read <json>``: one run in full (``bot``, ``job``,
     ``run``). A phone's pushes are encrypted to it alone, so naming another phone's id only changes what that
     phone is sent; the runs themselves are the gateway's, which the dashboard can read anyway."""
-    op, _, rest = raw.partition(" ")
-    try:
-        data = json.loads(rest.strip())
-    except ValueError:
-        return reply(ok=False, error="not JSON")
+    op, data, bad = op_and_json(raw, reply)
+    if bad is not None:
+        return bad
     if not isinstance(data, dict) or not isinstance(data.get("device_id"), str):
         return reply(ok=False, error="bad device_id")
     follows = cron.Follows(store)
@@ -152,11 +158,9 @@ def profiles_command(store: Store, raw: str, reply: Callable[..., str], phones: 
     ``profiles``, a list of names, so a profile not on it (unknown, or made later) is not sent; ``clear`` goes back
     to no list; ``test`` sends the phone one synthetic Bot Chat message for ``profile`` through the same check
     as the real ones, and answers whether it was ``allowed`` and ``sent``."""
-    op, _, rest = raw.partition(" ")
-    try:
-        data = json.loads(rest.strip())
-    except ValueError:
-        return reply(ok=False, error="not JSON")
+    op, data, bad = op_and_json(raw, reply)
+    if bad is not None:
+        return bad
     if not isinstance(data, dict) or not isinstance(data.get("device_id"), str):
         return reply(ok=False, error="bad device_id")
     # Any phone the plugin knows: registered for push, or only using phone tools.
@@ -201,6 +205,43 @@ def make_handler(store: Store, version: str, watching: Callable[[], bool],
     def reply(**data) -> str:
         return json.dumps(data, separators=(",", ":"))
 
+    def info(rest: str) -> str:
+        return reply(ok=True, version=version, gateway=store.public_identity(), watching=watching(),
+                     devices=len(store.devices()), phone_tools=sorted(TOOLS), features=FEATURES)
+
+    def register(rest: str) -> str:
+        try:
+            data = json.loads(rest)
+            device = Device.parse(data)
+            # The phone's allowed profiles travel with the registration, so a renewed phone is limited
+            # from its first push. Without them (an older app), a list it already has stays as it is.
+            profiles = data.get("profiles") if isinstance(data, dict) else None
+            store.upsert(device, profiles)
+        except ValueError as exc:  # InvalidRegistration and JSON errors
+            return reply(ok=False, error=str(exc) if isinstance(exc, InvalidRegistration) else "not JSON")
+        log.info("herald-push: registered %s", device.name)
+        return reply(ok=True, version=version, gateway=store.public_identity(), watching=watching(),
+                     features=FEATURES, profiles=store.allowed_profiles(device.device_id))
+
+    def unregister(rest: str) -> str:
+        return reply(ok=store.remove(rest))
+
+    def test(rest: str) -> str:
+        device = store.get(rest)
+        if device is None:
+            return reply(ok=False, error="not registered")
+        _, _, sig = store.identity()
+        return reply(ok=push.publish(device, push.message("ping"), sig))
+
+    # One entry per operation; "phone" exists only when this gateway has phone tools.
+    ops: dict = {
+        "": info, "info": info, "register": register, "unregister": unregister, "test": test,
+        "cron": lambda rest: cron_command(store, rest, reply, root),
+        "profiles": lambda rest: profiles_command(store, rest, reply, phones),
+    }
+    if phones is not None:
+        ops["phone"] = lambda rest: phone_command(phones, rest, reply)
+
     def handle(raw: str) -> str:
         # Exceptions would be swallowed into a generic "unknown command": always answer.
         try:
@@ -210,38 +251,10 @@ def make_handler(store: Store, version: str, watching: Callable[[], bool],
             if len(raw) > (MAX_ANSWER_ARG if raw.startswith("phone answer ") else MAX_ARG):
                 return reply(ok=False, error="too long")
             op, _, rest = raw.partition(" ")
-            rest = rest.strip()
-            if op in ("", "info"):
-                return reply(ok=True, version=version, gateway=store.public_identity(), watching=watching(),
-                             devices=len(store.devices()), phone_tools=sorted(TOOLS), features=FEATURES)
-            if op == "phone" and phones is not None:
-                return phone_command(phones, rest, reply)
-            if op == "cron":
-                return cron_command(store, rest, reply, root)
-            if op == "profiles":
-                return profiles_command(store, rest, reply, phones)
-            if op == "register":
-                try:
-                    data = json.loads(rest)
-                    device = Device.parse(data)
-                    # The phone's allowed profiles travel with the registration, so a renewed phone is limited
-                    # from its first push. Without them (an older app), a list it already has stays as it is.
-                    profiles = data.get("profiles") if isinstance(data, dict) else None
-                    store.upsert(device, profiles)
-                except ValueError as exc:  # InvalidRegistration and JSON errors
-                    return reply(ok=False, error=str(exc) if isinstance(exc, InvalidRegistration) else "not JSON")
-                log.info("herald-push: registered %s", device.name)
-                return reply(ok=True, version=version, gateway=store.public_identity(), watching=watching(),
-                             features=FEATURES, profiles=store.allowed_profiles(device.device_id))
-            if op == "unregister":
-                return reply(ok=store.remove(rest))
-            if op == "test":
-                device = store.get(rest)
-                if device is None:
-                    return reply(ok=False, error="not registered")
-                _, _, sig = store.identity()
-                return reply(ok=push.publish(device, push.message("ping"), sig))
-            return reply(ok=False, error=USAGE)
+            operation = ops.get(op)
+            if operation is None:
+                return reply(ok=False, error=USAGE)
+            return operation(rest.strip())
         except Exception as exc:
             log.exception("herald-push: command failed")
             return reply(ok=False, error=type(exc).__name__)
