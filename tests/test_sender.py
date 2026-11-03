@@ -151,3 +151,26 @@ def test_stop_ends_the_workers(tmp_path, clock, make_device, wait_until):
     threads = list(queue._threads.values())
     queue.stop()
     assert all(not t.is_alive() for t in threads)
+
+
+def test_ntfy_coming_back_delivers_a_new_push_within_half_a_minute(tmp_path, clock, make_device):
+    answers, bodies = [push.RETRY] * 4, []
+
+    def post(device, body, client):
+        bodies.append(body)
+        return answers.pop(0) if answers else push.OK
+
+    _, box, queue, (phone,) = build(tmp_path, clock, make_device, post)
+    queue.submit(phone, push.message("ping"), SIG)
+    for _ in range(4):
+        assert queue.step(phone.device_id) == 0.0
+        clock.t += 3600  # let each backoff pass
+    assert box.head(phone.device_id) is not None
+    clock.t -= 3600  # back to just after the 4th failure, an hour of backoff pending
+    queue.submit(phone, push.message("ping"), SIG)
+    assert queue.step(phone.device_id) == pytest.approx(30.0)
+    clock.t += 30
+    assert queue.step(phone.device_id) == 0.0
+    assert box.head(phone.device_id).body != ""  # the old one went first
+    assert queue.step(phone.device_id) == 0.0
+    assert box.head(phone.device_id) is None

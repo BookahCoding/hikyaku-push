@@ -24,6 +24,8 @@ log = logging.getLogger(__name__)
 BACKOFF_SECONDS = (5, 30, 300, 3600)
 MAX_AGE_SECONDS = 24 * 3600
 MAX_PER_DEVICE = 200
+# A new push for a phone that is backing off makes its oldest item retry within this long: ntfy may be back.
+PROBE_SECONDS = 30
 
 
 @dataclass
@@ -72,6 +74,10 @@ class Outbox:
             item = Item(uuid.uuid4().hex, device_id, topic, body, self.now())
             self._items.append(item)
             mine = [i for i in self._items if i.device_id == device_id]
+            soon = self.now() + PROBE_SECONDS
+            for waiting in mine:
+                if waiting.next_try > soon:
+                    waiting.next_try = soon
             excess = len(mine) - self.max_per_device
             if excess > 0:
                 dropped = {i.id for i in mine[:excess]}

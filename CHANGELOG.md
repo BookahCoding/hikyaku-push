@@ -6,6 +6,7 @@ Reliability. No change to the wire format or to what the app sends.
 
 - Pushes go through a per-phone send queue. A slow or unreachable ntfy server now delays only the phones that use it.
 - A push that ntfy didn't take is kept on disk (`outbox.json`, sealed, never the plaintext) and retried after 5 s, 30 s, 5 min, then hourly. Items older than 24 h are dropped, and a phone keeps at most 200.
+- A new push for a phone that is backing off makes its oldest queued item retry within 30 s, so a fresh message isn't held for an hour after ntfy comes back.
 - An answer retrying can't fix (most 4xx) is dropped instead of retried forever.
 - A bot's database is not read again while it is unchanged (still re-read at least once a minute).
 - `info` and `register` answers list the `reliable_push` feature.

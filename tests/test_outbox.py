@@ -98,3 +98,24 @@ def test_the_file_is_private(tmp_path, clock):
     path = tmp_path / "outbox.json"
     Outbox(path, now=clock).add("a", "t", "1")
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_a_new_push_gives_a_backed_off_phone_an_early_retry(tmp_path, clock):
+    box = Outbox(tmp_path / "outbox.json", now=clock)
+    old = box.add("a", "t", "old")
+    for _ in range(4):
+        box.retry_later(old.id)  # now waiting an hour
+    assert box.head("a").next_try - clock.t == 3600
+    clock.t += 400  # ntfy is back, and a fresh reply is queued
+    box.add("a", "t", "fresh")
+    assert box.head("a").body == "old"
+    assert box.head("a").next_try - clock.t <= 30
+    other = box.add("b", "t", "x")
+    assert box.head("b").next_try == other.next_try  # untouched: nothing was backed off
+
+
+def test_a_phone_not_backed_off_keeps_its_schedule(tmp_path, clock):
+    box = Outbox(tmp_path / "outbox.json", now=clock)
+    box.add("a", "t", "1")
+    box.add("a", "t", "2")
+    assert box.head("a").next_try == 0.0
