@@ -20,6 +20,8 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import httpx
 
 from . import cron, push
+from .outbox import Outbox
+from .sender import SendQueue
 from .store import Allowlist, Store
 
 log = logging.getLogger(__name__)
@@ -215,11 +217,18 @@ class _LeaderLock:
 
 class Watcher:
     def __init__(self, root: Path, store: Store, enabled: Callable[[Path], bool] = profile_enabled,
-                 now: Callable[[], float] = time.time):
+                 now: Callable[[], float] = time.time, sender=None, signature=None):
         self.root = root
         self.store = store
         self.enabled = enabled
         self.now = now
+        # Where pushes go: a SendQueue (the leader makes one), or None to post straight to ntfy, as in tests.
+        self.sender = sender
+        self._own_sender = False
+        self._sender_client: Optional[httpx.Client] = None
+        # Optional: signature(home) says whether a profile's database changed (see db_signature). None: always read.
+        self.signature = signature
+        self._seen: Dict[str, tuple] = {}
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = _LeaderLock(store.root / "leader.lock")
@@ -245,6 +254,13 @@ class Watcher:
         if self._thread is not None:
             self._thread.join(timeout=10)
         self._thread = None
+        if self._own_sender and self.sender is not None:
+            self.sender.stop()
+            self.sender = None
+            self._own_sender = False
+            if self._sender_client is not None:
+                self._sender_client.close()
+                self._sender_client = None
         if self._marks_dirty:
             try:
                 self.store.save_marks(self._marks)
@@ -261,16 +277,34 @@ class Watcher:
         if self._stop.is_set():
             return
         self._marks = self.store.marks()
+        if self.sender is None:
+            self.sender = self._make_sender()
+            self._own_sender = True
         with httpx.Client(timeout=httpx.Timeout(15.0, connect=10.0), follow_redirects=False) as client:
             while not self._stop.is_set():
                 try:
                     self.poll(client)
                 except Exception:  # never let one bad poll end the watcher
                     log.exception("herald-push: poll failed")
+                    self._seen.clear()  # read everything again next time
                 self._stop.wait(POLL_SECONDS)
 
+    def _make_sender(self) -> SendQueue:
+        """The leader's send queue: queued pushes left by an earlier run are delivered first."""
+        self._sender_client = httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=False)
+        outbox = Outbox(self.store.root / "outbox.json", now=self.now)
+        queue = SendQueue(self.store, outbox, client=self._sender_client, now=self.now)
+        queue.start()
+        return queue
+
+    def _deliver(self, device, payload: dict, sig, client: Optional[httpx.Client]) -> bool:
+        """Hands a push on: to the send queue when there is one (True = queued), else straight to ntfy."""
+        if self.sender is not None:
+            return self.sender.submit(device, payload, sig)
+        return push.publish(device, payload, sig, client)
+
     def poll(self, client: Optional[httpx.Client] = None) -> int:
-        """One pass over every bot and every cron job; returns how many pushes went out."""
+        """One pass over every bot and every cron job; returns how many pushes were handed on for delivery."""
         # Devices first, then the lists: a phone seen here has its list (the store writes them in that order).
         devices = self.store.devices()
         allow = self.store.allowlist()
@@ -319,7 +353,7 @@ class Watcher:
                     # Only to phones that may hear from this profile; the mark moves on either way.
                     if not allow.allows(device.device_id, profile):
                         continue
-                    if push.publish(device, payload, sig, client):
+                    if self._deliver(device, payload, sig, client):
                         sent += 1
         if changed:
             # Drop marks of chats that are no longer anyone's tip.
@@ -360,6 +394,6 @@ class Watcher:
                     "cron_run", bot=run.profile, job=run.job_id, run=run.run, label=run.name,
                     status=run.status, notify=notify, text=push.clip(run.text), at=int(run.at),
                 )
-                if push.publish(device, payload, sig, client):
+                if self._deliver(device, payload, sig, client):
                     sent += 1
         return sent
