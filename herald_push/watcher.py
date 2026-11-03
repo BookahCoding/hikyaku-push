@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -31,6 +32,8 @@ BOT_CHAT_TITLE = "Bot Chat"
 POLL_SECONDS = 3.0
 # After a restart, replies older than this are old news: don't push them.
 STALE_SECONDS = 15 * 60
+# A profile whose database looks unchanged is read anyway this often, as a safety net for a signature that missed a write.
+FULL_READ_SECONDS = 60
 MAX_PER_POLL = 4
 # Where the watcher left off is written when a push went out, else at most this often: a lost mark costs
 # one duplicate the phone drops, so an fsync per poll during a busy turn isn't worth it.
@@ -103,6 +106,22 @@ def profile_homes(root: Path) -> Iterable[Tuple[str, Path]]:
         for home in sorted(profiles.iterdir()):
             if home.is_dir() and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", home.name):
                 yield home.name, home
+
+
+def db_signature(home: Path):
+    """What changes when a profile's ``state.db`` is written: the modification time and size of the database and
+    its write-ahead log. A missing file is None; any other error makes the whole signature None (always read)."""
+    parts = []
+    for name in ("state.db", "state.db-wal"):
+        try:
+            stat = os.stat(home / name)
+        except FileNotFoundError:
+            parts.append(None)
+        except OSError:
+            return None
+        else:
+            parts.append((stat.st_mtime_ns, stat.st_size))
+    return tuple(parts)
 
 
 def bot_chat_tip(home: Path) -> Optional[str]:
@@ -297,6 +316,14 @@ class Watcher:
         queue.start()
         return queue
 
+    def _unchanged(self, profile: str, sig) -> bool:
+        """True when a profile's database has the signature it had when it was last read, and that was under a
+        minute ago."""
+        if self.signature is None or sig is None:
+            return False
+        last = self._seen.get(profile)
+        return last is not None and last[0] == sig and self.now() - last[1] < FULL_READ_SECONDS
+
     def _deliver(self, device, payload: dict, sig, client: Optional[httpx.Client]) -> bool:
         """Hands a push on: to the send queue when there is one (True = queued), else straight to ntfy."""
         if self.sender is not None:
@@ -311,11 +338,16 @@ class Watcher:
         sent = self.poll_cron(devices, client, allow)
         changed = False
         for profile, home in profile_homes(self.root):
+            # Taken before the read, so a write that lands during it shows up as a change next time.
+            sig = self.signature(home) if self.signature is not None else None
+            if self._unchanged(profile, sig):
+                continue
             try:
                 tip = bot_chat_tip(home)
             except Exception:
                 log.debug("herald-push: can't read %s", profile, exc_info=True)
                 continue
+            self._seen[profile] = (sig, self.now())
             if not tip:
                 continue
             key = f"{profile}:{tip}"

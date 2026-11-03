@@ -11,7 +11,7 @@ from . import push
 from .commands import make_handler
 from .phone import CALL_TOOL, Phones, register_tools
 from .store import Store
-from .watcher import Watcher, is_long_lived_process
+from .watcher import Watcher, db_signature, is_long_lived_process
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ def register(ctx) -> None:
     with _watcher_lock:
         if _watcher is None:
             # One watcher for every profile; each bot's own "Send notifications" setting is read as it polls.
-            _watcher = Watcher(root, store)
+            _watcher = Watcher(root, store, signature=db_signature)
             _watcher.start()
             log.info("herald-push: watching Bot Chats and cron runs")
             started = _watcher
