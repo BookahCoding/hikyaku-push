@@ -1,6 +1,6 @@
 import pytest
 
-from herald_push import approvals, push
+from herald_push import approvals, push, watcher
 from herald_push.approvals import DEDUPE_SECONDS, MAX_COMMAND, MAX_DESCRIPTION, ApprovalNotifier
 from herald_push.store import Store
 
@@ -125,14 +125,15 @@ def test_the_secret_in_a_command_is_redacted(tmp_path, clock, make_device):
     assert "SECRET" not in command and "***" in command
 
 
-def test_when_redaction_is_unavailable_only_the_description_goes(tmp_path, clock, make_device):
+def test_when_redaction_is_unavailable_only_the_bots_name_goes(tmp_path, clock, make_device):
     def missing(text):
         raise ImportError("no agent.redact")
 
     _, _, sent, notifier = build(tmp_path, clock, make_device, redact=missing)
-    ask(notifier, command="curl -H token=SECRET https://example.test")
+    ask(notifier, command="curl -H token=SECRET https://example.test", description="Write to ~/.env: KEY=SECRET")
     payload = sent.payloads[0][1]
-    assert "command" not in payload and payload["description"] == "recursive delete"
+    assert "command" not in payload and "description" not in payload
+    assert payload["type"] == "approval" and payload["bot"] == "default"
 
 
 def test_long_text_is_clipped(tmp_path, clock, make_device):
@@ -170,11 +171,10 @@ def test_the_hook_returns_before_any_post_runs(tmp_path, clock, make_device):
     assert len(sent.posts) == 1
 
 
-def test_no_registered_phone_means_no_work(tmp_path, clock, make_device):
-    pending = []
-    _, _, sent, notifier = build(tmp_path, clock, make_device, phones=0, spawn=pending.append)
+def test_no_registered_phone_means_nothing_is_sent(tmp_path, clock, make_device):
+    _, _, sent, notifier = build(tmp_path, clock, make_device, phones=0)
     ask(notifier)
-    assert pending == [] and sent.posts == []
+    assert sent.posts == [] and sent.payloads == []
 
 
 def test_a_failing_post_never_reaches_the_agent(tmp_path, clock, make_device):
@@ -301,3 +301,97 @@ def test_register_attaches_the_hook_only_in_a_long_lived_process(tmp_path, monke
     assert [name for name, _ in long_lived.hooks] == [HOOK]
     for stop in long_lived.unloads:
         stop()
+
+
+def test_the_hook_does_no_lookups_on_the_callers_thread(tmp_path, clock, make_device):
+    pending, calls = [], []
+    store, _, sent, notifier = build(
+        tmp_path, clock, make_device, spawn=pending.append,
+        redact=lambda text: calls.append("redact") or text, resolve=lambda key: calls.append("resolve") or "")
+    notifier.enabled = lambda home: calls.append("enabled") or True
+    real_devices, real_allowlist = store.devices, store.allowlist
+    store.devices = lambda: calls.append("devices") or real_devices()
+    store.allowlist = lambda: calls.append("allowlist") or real_allowlist()
+    ask(notifier)
+    assert calls == [] and len(pending) == 1 and sent.posts == []
+    pending[0]()
+    assert {"resolve", "enabled", "devices", "allowlist", "redact"} <= set(calls) and len(sent.posts) == 1
+
+
+def test_the_description_is_redacted_too(tmp_path, clock, make_device):
+    _, _, sent, notifier = build(tmp_path, clock, make_device)
+    ask(notifier, description="Write to ~/.env: API_KEY=SECRET")
+    description = sent.payloads[0][1]["description"]
+    assert "SECRET" not in description and "***" in description
+
+
+def test_the_owning_profiles_own_switch_decides(tmp_path, clock, make_device):
+    """The session belongs to 'other', whose config turns this plugin's notifications off."""
+    home = tmp_path / "hermes" / "profiles" / "other"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text(
+        "plugins:\n  entries:\n    herald-push:\n      settings:\n        enabled: false\n", encoding="utf-8")
+    _, _, sent, notifier = build(tmp_path, clock, make_device, resolve=lambda key: "other")
+    notifier.enabled = watcher.profile_enabled
+    ask(notifier)
+    assert sent.posts == []
+
+
+def test_the_owning_profiles_title_is_the_label(tmp_path, clock, make_device):
+    home = tmp_path / "hermes" / "profiles" / "other"
+    home.mkdir(parents=True)
+    (home / "profile.yaml").write_text("ui_meta:\n  hermes-bots:\n    title: Other Bot\n", encoding="utf-8")
+    _, _, sent, notifier = build(tmp_path, clock, make_device, resolve=lambda key: "other")
+    ask(notifier)
+    assert sent.payloads[0][1]["label"] == "Other Bot"
+
+
+def test_a_session_of_the_default_profile_uses_the_root_home(tmp_path, clock, make_device):
+    root = tmp_path / "hermes"
+    root.mkdir()
+    (root / "profile.yaml").write_text("ui_meta:\n  hermes-bots:\n    title: Root Bot\n", encoding="utf-8")
+    _, _, sent, notifier = build(tmp_path, clock, make_device, profile="side", resolve=lambda key: "default")
+    ask(notifier)
+    assert sent.payloads[0][1]["bot"] == "default" and sent.payloads[0][1]["label"] == "Root Bot"
+
+
+def test_attach_fails_closed_when_the_profile_cannot_be_told(tmp_path):
+    store, root = Store(tmp_path / "data"), tmp_path / "hermes"
+    no_home = types.SimpleNamespace(register_hook=lambda name, callback: None, _manager=types.SimpleNamespace())
+    no_manager = types.SimpleNamespace(register_hook=lambda name, callback: None)
+    assert attach(no_home, store, root) is None
+    assert attach(no_manager, store, root) is None
+
+
+def test_a_failing_attach_does_not_stop_the_watcher(tmp_path, monkeypatch):
+    started = []
+
+    class Ctx:
+        def register_command(self, name, handler, description="", args_hint=""):
+            pass
+
+        def on_unload(self, callback):
+            pass
+
+    class DummyWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            started.append(True)
+
+        def stop(self):
+            pass
+
+    def broken(ctx, store, root):
+        raise OSError("cannot resolve the home")
+
+    monkeypatch.setattr(plugin, "_root", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "register_tools", lambda ctx, phones: None)
+    monkeypatch.setattr(plugin, "Watcher", DummyWatcher)
+    monkeypatch.setattr(plugin, "_watcher", None)
+    monkeypatch.setattr(plugin, "is_long_lived_process", lambda: True)
+    monkeypatch.setattr(plugin, "attach", broken)
+    ctx = Ctx()
+    plugin.register(ctx)
+    assert started == [True]

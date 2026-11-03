@@ -75,7 +75,10 @@ def register(ctx) -> None:
 
     if not is_long_lived_process():
         return
-    attach(ctx, store, root)
+    try:
+        attach(ctx, store, root)
+    except Exception:  # a failure here must not stop the watcher: bot replies would no longer be pushed
+        log.warning("herald-push: approval pushes are off", exc_info=True)
     with _watcher_lock:
         if _watcher is None:
             # One watcher for every profile; each bot's own "Send notifications" setting is read as it polls.

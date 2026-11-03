@@ -39,6 +39,7 @@ _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 # One map for the whole process, keyed without the profile: several plugin instances may see one request.
 _recent: Dict[str, float] = {}
 _recent_lock = threading.Lock()
+_redaction_warned = False
 
 
 def host_redact(text: str) -> str:
@@ -102,8 +103,20 @@ class ApprovalNotifier:
         return self.profile, self.home
 
     def _notify(self, kwargs: dict) -> None:
+        # Only this cheap filter runs on the agent's thread. Every lookup (state.db, config, the store's files)
+        # and the redaction can block for a while, so they all happen on the daemon thread.
         if kwargs.get("coalesced") or kwargs.get("surface") not in SURFACES:
             return
+        request = dict(kwargs)
+        self.spawn(lambda: self._work(request))
+
+    def _work(self, kwargs: dict) -> None:
+        try:
+            self._prepare_and_send(kwargs)
+        except Exception:
+            log.exception("herald-push: couldn't send an approval push")
+
+    def _prepare_and_send(self, kwargs: dict) -> None:
         command = str(kwargs.get("command") or "")
         description = str(kwargs.get("description") or "")
         session = str(kwargs.get("session_key") or "")
@@ -119,18 +132,22 @@ class ApprovalNotifier:
             return
         payload = push.message(
             "approval", bot=profile, label=bot_label(home, profile), session=session or None,
-            command=self._safe_command(command), description=clip(description, MAX_DESCRIPTION) or None,
+            command=self._safe_text(command, MAX_COMMAND), description=self._safe_text(description, MAX_DESCRIPTION),
             request_id=key[:12])
         sig = self.store.identity()[2]
-        self.spawn(lambda: self._send(profile, devices, payload, sig))
+        self._send(profile, devices, payload, sig)
 
-    def _safe_command(self, command: str) -> Optional[str]:
-        """The command with secrets redacted and clipped, or None when it can't be redacted."""
-        if not command:
+    def _safe_text(self, text: str, limit: int) -> Optional[str]:
+        """The text with secrets redacted, then clipped; None when it can't be redacted (it is then left out)."""
+        global _redaction_warned
+        if not text:
             return None
         try:
-            return clip(self.redact(command), MAX_COMMAND) or None
-        except Exception:
+            return clip(self.redact(text), limit) or None
+        except Exception as exc:
+            if not _redaction_warned:
+                _redaction_warned = True
+                log.warning("herald-push: can't redact approval text (%s); only the bot's name is sent", type(exc).__name__)
             return None
 
     def _send(self, profile: str, devices, payload: dict, sig) -> None:
@@ -155,9 +172,17 @@ def attach(ctx, store: Store, root: Path) -> Optional[ApprovalNotifier]:
     register = getattr(ctx, "register_hook", None)
     if register is None:
         return None
-    manager = getattr(ctx, "_manager", None)
-    home = Path(getattr(manager, "home_path", None) or root)
-    profile = "default" if home.resolve() == Path(root).resolve() else home.name
+    try:
+        home_path = getattr(getattr(ctx, "_manager", None), "home_path", None)
+        if not home_path:
+            # Guessing "default" here could push one bot's approvals to phones allowed only another's.
+            log.warning("herald-push: can't tell which profile this plugin serves; approval pushes are off")
+            return None
+        home = Path(home_path)
+        profile = "default" if home.resolve() == Path(root).resolve() else home.name
+    except Exception:
+        log.warning("herald-push: can't tell which profile this plugin serves; approval pushes are off", exc_info=True)
+        return None
     if not PROFILE_RE.match(profile):
         log.warning("herald-push: approval pushes are off for a profile with an unusable name")
         return None
