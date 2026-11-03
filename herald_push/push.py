@@ -48,7 +48,7 @@ def clip_bytes(text: str, limit: int) -> str:
     return cut.rstrip() + "…"
 
 
-SHRINKABLE = ("text", "details", "reason")
+SHRINKABLE = ("text", "details", "reason", "description", "command")
 
 
 def envelope_for(device: Device, payload: dict, sig_key) -> str:
