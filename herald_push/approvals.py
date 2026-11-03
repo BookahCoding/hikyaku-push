@@ -147,3 +147,24 @@ class ApprovalNotifier:
                         log.warning("herald-push: an approval push for %s was not taken (%s)", profile, outcome)
         except Exception:
             log.exception("herald-push: sending approval pushes failed")
+
+
+def attach(ctx, store: Store, root: Path) -> Optional[ApprovalNotifier]:
+    """Registers the approval observer for this plugin's profile. None when this Hermes can't (no hook support) or
+    the profile's name is not one the plugin handles; the plugin then simply sends no approval pushes."""
+    register = getattr(ctx, "register_hook", None)
+    if register is None:
+        return None
+    manager = getattr(ctx, "_manager", None)
+    home = Path(getattr(manager, "home_path", None) or root)
+    profile = "default" if home.resolve() == Path(root).resolve() else home.name
+    if not PROFILE_RE.match(profile):
+        log.warning("herald-push: approval pushes are off for a profile with an unusable name")
+        return None
+    notifier = ApprovalNotifier(store, profile, home, root)
+    try:
+        register(HOOK, notifier.on_request)
+    except Exception:
+        log.warning("herald-push: this Hermes can't register %s; approval pushes are off", HOOK, exc_info=True)
+        return None
+    return notifier

@@ -71,3 +71,7 @@ def test_op_and_json_splits_and_parses(store):
 def test_info_announces_reliable_push_next_to_the_profile_allowlist(store):
     features = answer(handler(store), "info")["features"]
     assert "reliable_push" in features and "profile_allowlist" in features
+
+
+def test_info_announces_approval_push(store):
+    assert "approval_push" in answer(handler(store), "info")["features"]

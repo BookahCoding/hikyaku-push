@@ -34,6 +34,10 @@ hermes plugins install https://github.com/BookahCoding/hikyaku-push
 
 **Not yet:** replying or approving through push. Those still use the direct connection.
 
+## Approval notifications (0.8.0)
+
+When a bot is blocked waiting for you to approve a command, each phone allowed that bot's profile gets one end-to-end encrypted notification naming the bot, what it wants to do and the command (secrets redacted by Hermes, clipped to 160 characters). Tapping it opens the chat in Hikyaku, where you approve as usual: nothing can be approved from the notification, and the plugin never changes how approvals work. A failed notification is dropped, not retried, because an approval is only useful for minutes.
+
 ## Delivery (0.7.0)
 
 Each message is sealed once and put in a small queue (`outbox.json` in the plugin's data folder, mode 0600, holding only the encrypted envelope). One worker per phone posts it to ntfy. If ntfy can't be reached, or answers with an error that may pass, the message is retried after 5 s, 30 s, 5 min, then every hour, for up to 24 hours (the phone ignores anything older). A message may arrive twice if the plugin stops after ntfy took it; the phone drops repeats by message id. A phone that is removed, or registers again with new topics, is sent nothing from before.

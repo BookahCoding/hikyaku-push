@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+
+- When a bot waits for the user to approve a command, every phone allowed that bot's profile gets one encrypted `approval` notification (bot, a short description and the command with secrets redacted). Tapping it opens the chat in Hikyaku; the approval itself is answered there, as before.
+- It is sent from a background thread, so it can never slow the agent, and a failed send is logged and dropped. The same request seen twice within a minute is pushed once.
+- If this Hermes can't redact the command, only the description is sent. A Hermes without the approval hook simply sends nothing.
+- `info` and `register` answers list the `approval_push` feature. Old apps ignore the new message.
+
 ## 0.7.0
 
 Reliability. No change to the wire format or to what the app sends.

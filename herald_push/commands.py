@@ -19,7 +19,7 @@ from .store import PROFILE_RE, InvalidRegistration, Device, Store
 from .watcher import profile_homes
 
 # What this plugin can do that Herald checks for by name, not by version number.
-FEATURES = ["profile_allowlist", "reliable_push"]
+FEATURES = ["profile_allowlist", "reliable_push", "approval_push"]
 
 log = logging.getLogger(__name__)
 

@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 from . import push
+from .approvals import attach
 from .commands import make_handler
 from .phone import CALL_TOOL, Phones, register_tools
 from .store import Store
@@ -15,7 +16,7 @@ from .watcher import Watcher, db_signature, is_long_lived_process
 
 log = logging.getLogger(__name__)
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 # A ring's push: what it says fits ntfy's 4096-byte message limit once sealed (base64 grows it by a third).
 MAX_REASON_BYTES = 600
@@ -74,6 +75,7 @@ def register(ctx) -> None:
 
     if not is_long_lived_process():
         return
+    attach(ctx, store, root)
     with _watcher_lock:
         if _watcher is None:
             # One watcher for every profile; each bot's own "Send notifications" setting is read as it polls.

@@ -220,3 +220,84 @@ def test_the_worst_case_escaped_text_still_fits_one_push(tmp_path, clock, make_d
     ask(notifier, command="\x01" * 400, description="\x01" * 500)
     assert sent.posts, "the push was refused instead of shortened"
     assert all(len(body.encode("utf-8")) <= push.MAX_BODY for _, body in sent.posts)
+
+
+import types
+from pathlib import Path
+
+from herald_push import plugin
+from herald_push.approvals import HOOK, attach
+
+
+class HookCtx:
+    def __init__(self, home, *, error=None):
+        self.hooks, self._error = [], error
+        self._manager = types.SimpleNamespace(home_path=home)
+
+    def register_hook(self, name, callback):
+        if self._error is not None:
+            raise self._error
+        self.hooks.append((name, callback))
+
+
+def test_attach_registers_the_observer_for_the_plugins_own_profile(tmp_path):
+    root = tmp_path / "hermes"
+    store = Store(tmp_path / "data")
+    default = HookCtx(root)
+    notifier = attach(default, store, root)
+    assert [name for name, _ in default.hooks] == [HOOK] and notifier.profile == "default"
+    side = HookCtx(root / "profiles" / "side")
+    assert attach(side, store, root).profile == "side"
+    assert default.hooks[0][1] == notifier.on_request
+
+
+def test_attach_refuses_a_profile_name_it_cannot_use(tmp_path):
+    root = tmp_path / "hermes"
+    assert attach(HookCtx(root / "profiles" / "bad name!"), Store(tmp_path / "data"), root) is None
+
+
+def test_attach_survives_a_hermes_without_the_hook(tmp_path):
+    root = tmp_path / "hermes"
+    store = Store(tmp_path / "data")
+    assert attach(HookCtx(root, error=ValueError("unknown hook")), store, root) is None
+    assert attach(types.SimpleNamespace(_manager=types.SimpleNamespace(home_path=root)), store, root) is None
+
+
+def test_register_attaches_the_hook_only_in_a_long_lived_process(tmp_path, monkeypatch):
+    class Ctx(HookCtx):
+        def __init__(self):
+            super().__init__(tmp_path)
+            self.commands, self.unloads = [], []
+
+        def register_command(self, name, handler, description="", args_hint=""):
+            self.commands.append(name)
+
+        def on_unload(self, callback):
+            self.unloads.append(callback)
+
+    class DummyWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(plugin, "_root", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "register_tools", lambda ctx, phones: None)
+    monkeypatch.setattr(plugin, "Watcher", DummyWatcher)
+    monkeypatch.setattr(plugin, "_watcher", None)
+
+    monkeypatch.setattr(plugin, "is_long_lived_process", lambda: False)
+    short = Ctx()
+    plugin.register(short)
+    assert short.commands == ["herald-push"] and short.hooks == []
+
+    monkeypatch.setattr(plugin, "is_long_lived_process", lambda: True)
+    long_lived = Ctx()
+    plugin.register(long_lived)
+    assert [name for name, _ in long_lived.hooks] == [HOOK]
+    for stop in long_lived.unloads:
+        stop()
