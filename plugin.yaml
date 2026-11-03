@@ -1,6 +1,6 @@
 name: herald-push
 label: Herald push
-version: 0.6.0
+version: 0.7.0
 manifest_version: 2
 requires_hermes: ">=0.21.5"
 description: >
@@ -12,7 +12,7 @@ description: >
   switched on in Herald, and every change asks on the phone first. With Calls on in Herald, the agent can
   ring the user's own phone and watch for something urgent, and talk it over by voice.
 author: Giton22
-homepage: https://github.com/Giton22/hermes-herald-push
+homepage: https://github.com/BookahCoding/hikyaku-push
 license: MIT
 provides_tools:
   - phone_battery

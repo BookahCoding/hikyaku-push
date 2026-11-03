@@ -66,3 +66,8 @@ def test_op_and_json_splits_and_parses(store):
     op, data, bad = commands.op_and_json("get nope", reply)
     assert op == "get" and data is None and json.loads(bad) == {"ok": False, "error": "not JSON"}
     assert commands.op_and_json("get null", reply) == ("get", None, None)
+
+
+def test_info_announces_reliable_push_next_to_the_profile_allowlist(store):
+    features = answer(handler(store), "info")["features"]
+    assert "reliable_push" in features and "profile_allowlist" in features

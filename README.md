@@ -1,5 +1,7 @@
 # herald-push
 
+Continues [Giton22/hermes-herald-push](https://github.com/Giton22/hermes-herald-push) (MIT).
+
 A Hermes plugin that sends your bots' messages to the [Herald](https://github.com/Giton22/herald) Android app
 even when the phone can't reach the gateway (off the tailnet, on mobile data). Messages travel through
 [ntfy](https://ntfy.sh), are **end-to-end encrypted** to the phone, and are **signed** by the gateway. ntfy
@@ -13,7 +15,7 @@ to and registers the phone, in one step.
 Or by hand on the gateway:
 
 ```
-hermes plugins install https://github.com/Giton22/hermes-herald-push
+hermes plugins install https://github.com/BookahCoding/hikyaku-push
 ```
 
 ## How it works
@@ -31,6 +33,10 @@ hermes plugins install https://github.com/Giton22/hermes-herald-push
   file mode 0600.
 
 **Not yet:** replying or approving through push. Those still use the direct connection.
+
+## Delivery (0.7.0)
+
+Each message is sealed once and put in a small queue (`outbox.json` in the plugin's data folder, mode 0600, holding only the encrypted envelope). One worker per phone posts it to ntfy. If ntfy can't be reached, or answers with an error that may pass, the message is retried after 5 s, 30 s, 5 min, then every hour, for up to 24 hours (the phone ignores anything older). A message may arrive twice if the plugin stops after ntfy took it; the phone drops repeats by message id. A phone that is removed, or registers again with new topics, is sent nothing from before.
 
 ## Which profiles a phone hears from (0.6.0)
 
