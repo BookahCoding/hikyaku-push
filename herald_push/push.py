@@ -68,24 +68,37 @@ def envelope_for(device: Device, payload: dict, sig_key) -> str:
         payload = dict(payload, **{field: value[: len(value) * 3 // 4 - 1].rstrip() + "…"})
 
 
+OK, RETRY, DROP = "ok", "retry", "drop"
+_HEADERS = {"Content-Type": "text/plain"}
+
+
+def post(device: Device, body: str, client: Optional[httpx.Client] = None) -> str:
+    """Posts a sealed envelope to the phone's topic. ``OK`` when ntfy took it; ``RETRY`` when trying again later
+    may work (no connection, 408, 429, 5xx); ``DROP`` for an answer that retrying won't change. No title, tags or
+    priority headers: they'd travel in the clear."""
+    url = f"{device.server}/{device.push_topic}"
+    content = body.encode("utf-8")
+    try:
+        if client is None:
+            with httpx.Client(timeout=_TIMEOUT, follow_redirects=False) as own:
+                response = own.post(url, content=content, headers=_HEADERS)
+        else:
+            response = client.post(url, content=content, headers=_HEADERS)
+    except httpx.HTTPError as exc:
+        log.warning("herald-push: couldn't reach %s: %s", device.server, type(exc).__name__)
+        return RETRY
+    code = response.status_code
+    if code < 300:
+        return OK
+    log.warning("herald-push: %s answered %s", device.server, code)
+    return RETRY if code in (408, 429) or code >= 500 else DROP
+
+
 def publish(device: Device, payload: dict, sig_key, client: Optional[httpx.Client] = None) -> bool:
-    """True when ntfy took it. No title, tags or priority headers: they'd travel in the clear."""
+    """True when ntfy took it, right now. Used where the caller wants the answer (the ``test`` command)."""
     try:
         body = envelope_for(device, payload, sig_key)
     except ValueError:
         log.warning("herald-push: a %s message is too large to send", payload.get("type"))
         return False
-    url = f"{device.server}/{device.push_topic}"
-    try:
-        if client is None:
-            with httpx.Client(timeout=_TIMEOUT, follow_redirects=False) as own:
-                response = own.post(url, content=body.encode("utf-8"), headers={"Content-Type": "text/plain"})
-        else:
-            response = client.post(url, content=body.encode("utf-8"), headers={"Content-Type": "text/plain"})
-    except httpx.HTTPError as exc:
-        log.warning("herald-push: couldn't reach %s: %s", device.server, type(exc).__name__)
-        return False
-    if response.status_code >= 300:
-        log.warning("herald-push: %s answered %s", device.server, response.status_code)
-        return False
-    return True
+    return post(device, body, client) == OK
